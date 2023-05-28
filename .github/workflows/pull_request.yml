@@ -1,0 +1,94 @@
+name: "CI Pipeline for Pull Requests"
+
+on:
+  pull_request:
+    branches:
+      - 'main'
+
+jobs:
+  pull_request:
+    name: "Run terraform plan on pull requests"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-region: eu-west-1
+          role-to-assume: "${{ secrets.PIPELINE_ROLE_ARN }}"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.4.6
+          terraform_wrapper: false
+
+      - name: Terraform Format
+        working-directory: ./tf
+        id: fmt
+        run: terraform fmt -recursive
+
+      - name: Terraform Init
+        working-directory: ./tf
+        id: init
+        run: terraform init
+      
+      - name: Terraform Validate
+        working-directory: ./tf
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        working-directory: ./tf
+        id: plan
+        env:
+          GITHUB_OWNER: "${{ secrets.OWNER_GITHUB }}"
+          GITHUB_TOKEN: "${{ secrets.TOKEN_GITHUB }}"
+        run: terraform plan -lock-timeout=5m -no-color |& tee "${{ runner.temp }}/tf_plan.txt"
+        continue-on-error: true
+
+      - name: Comment with plan
+        uses: actions/github-script@v6
+        with:
+          script: |
+            let plan = require('fs').readFileSync("${{ runner.temp }}/tf_plan.txt", 'utf8');
+            // Cut off refresh list and change-spam
+            plan = plan.replace(/^.*: Refreshing state.*\n?/gm, '');
+            const m = plan.match(/(No changes.|Terraform will perform)[\s\S]*/);
+            if (m) { plan = m[0]; }
+            if (plan.length > 60000) {
+              plan = `OUTPUT ABBREVIATED, SEE ACTION OUTPUT.\n${plan.slice(0, 50000)}\n[...]\n${plan.slice(-10000)}`;
+            }
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+            <details><summary>Show Plan</summary>
+            
+            \`\`\`\n
+            ${plan}
+            \`\`\`
+            </details>
+            
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+            if ("${{ steps.plan.outcome }}" !== "success") {
+              throw new Error("Terraform plan failed with outcome ${{ steps.plan.outcome }}, see the Terraform Plan step for details");
+            }

@@ -1,0 +1,68 @@
+name: "CICD Pipeline to Production"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+on:
+  push:
+    branches:
+      - 'main'
+
+jobs:
+  deploy:
+    name: "Deploy Github changes with Terraform"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Set AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-region: eu-west-1
+          role-to-assume: "${{ secrets.PIPELINE_ROLE_ARN }}"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "${{ secrets.TF_VERSION }}"
+
+      - name: Terraform Format
+        working-directory: ./tf
+        id: fmt
+        run: terraform fmt -recursive
+
+      - name: Terraform Init
+        working-directory: ./tf
+        id: init
+        run: terraform init
+
+      - name: Terraform Validate
+        working-directory: ./tf
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        working-directory: ./tf
+        id: plan
+        env:
+          GITHUB_OWNER: "${{ secrets.OWNER_GITHUB }}"
+          GITHUB_TOKEN: "${{ secrets.TOKEN_GITHUB }}"
+        run: terraform plan -lock-timeout=5m -no-color -out "${{ runner.temp }}/tf_plan.out"
+
+      - name: Terraform Apply
+        working-directory: ./tf
+        env:
+          GITHUB_OWNER: "${{ secrets.OWNER_GITHUB }}"
+          GITHUB_TOKEN: "${{ secrets.TOKEN_GITHUB }}"
+        run: terraform apply -lock-timeout=15m "${{ runner.temp }}/tf_plan.out"
